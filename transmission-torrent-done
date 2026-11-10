@@ -1,0 +1,35 @@
+#!/bin/sh
+
+USER_SCRIPT="/home/container/scripts/on-complete.sh"
+LOG_FILE="/home/container/logs/torrent-done.log"
+
+{
+    printf '%s | start | id=%s | hash=%s | name=%s | dir=%s\n' \
+        "${TR_TIME_LOCALTIME:-unknown-time}" \
+        "${TR_TORRENT_ID:-}" \
+        "${TR_TORRENT_HASH:-}" \
+        "${TR_TORRENT_NAME:-}" \
+        "${TR_TORRENT_DIR:-}"
+
+    if [ -f "${USER_SCRIPT}" ]; then
+        if /bin/bash "${USER_SCRIPT}"; then
+            printf '%s | success | id=%s | name=%s\n' \
+                "${TR_TIME_LOCALTIME:-unknown-time}" \
+                "${TR_TORRENT_ID:-}" \
+                "${TR_TORRENT_NAME:-}"
+        else
+            status=$?
+            printf '%s | ERROR exit=%s | id=%s | name=%s\n' \
+                "${TR_TIME_LOCALTIME:-unknown-time}" \
+                "${status}" \
+                "${TR_TORRENT_ID:-}" \
+                "${TR_TORRENT_NAME:-}"
+        fi
+    else
+        printf '%s | WARNING | user script not found: %s\n' \
+            "${TR_TIME_LOCALTIME:-unknown-time}" \
+            "${USER_SCRIPT}"
+    fi
+} >> "${LOG_FILE}" 2>&1
+
+exit 0

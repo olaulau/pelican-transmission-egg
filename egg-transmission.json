@@ -1,0 +1,82 @@
+{
+    "_comment": "Pelican Egg for Transmission on Debian 13",
+    "meta": {
+        "version": "PTDL_v2",
+        "update_url": null
+    },
+    "exported_at": "2026-11-07T00:00:00+0000",
+    "name": "Transmission (Debian 13)",
+    "author": "local-custom",
+    "description": "Transmission daemon with persistent downloads, SFTP access and user post-download script.",
+    "features": null,
+    "docker_images": {
+        "Local Debian 13 Transmission": "local/transmission:debian13"
+    },
+    "file_denylist": [],
+    "startup": "/usr/local/bin/transmission-entrypoint",
+    "config": {
+        "files": "{}",
+        "startup": "{\n    \"done\": \"Serving RPC and Web requests on\"\n}",
+        "logs": "{}",
+        "stop": "^C"
+    },
+    "scripts": {
+        "installation": {
+            "script": "#!/bin/bash\nset -e\necho 'Transmission is preinstalled in the custom Docker image.'\n",
+            "container": "debian:trixie-slim",
+            "entrypoint": "bash"
+        }
+    },
+    "variables": [
+        {
+            "name": "RPC username",
+            "description": "Username used to access the Transmission WebUI.",
+            "env_variable": "RPC_USERNAME",
+            "default_value": "transmission",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|max:64",
+            "field_type": "text"
+        },
+        {
+            "name": "RPC password",
+            "description": "Password for the Transmission WebUI. Use at least 8 characters. Must not start with '{'.",
+            "env_variable": "RPC_PASSWORD",
+            "default_value": "",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|string|min:8|max:128",
+            "field_type": "text"
+        },
+        {
+            "name": "BitTorrent port",
+            "description": "Must match the additional TCP and UDP allocation assigned to this server.",
+            "env_variable": "TORRENT_PORT",
+            "default_value": "51413",
+            "user_viewable": true,
+            "user_editable": true,
+            "rules": "required|integer|between:1,65535",
+            "field_type": "text"
+        },
+        {
+            "name": "Download directory",
+            "description": "Directory for completed downloads.",
+            "env_variable": "DOWNLOAD_DIR",
+            "default_value": "/home/container/downloads",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": "required|string|max:255",
+            "field_type": "text"
+        },
+        {
+            "name": "Incomplete directory",
+            "description": "Temporary directory for incomplete downloads.",
+            "env_variable": "INCOMPLETE_DIR",
+            "default_value": "/home/container/downloads/incomplete",
+            "user_viewable": true,
+            "user_editable": false,
+            "rules": "required|string|max:255",
+            "field_type": "text"
+        }
+    ]
+}

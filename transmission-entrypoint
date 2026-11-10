@@ -1,0 +1,275 @@
+#!/bin/sh
+set -eu
+
+CONFIG_DIR="${TRANSMISSION_HOME:-/home/container/.config/transmission-daemon}"
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-/home/container/downloads}"
+INCOMPLETE_DIR="${INCOMPLETE_DIR:-/home/container/downloads/incomplete}"
+SCRIPT_DIR="/home/container/scripts"
+LOG_DIR="/home/container/logs"
+SSH_DIR="/home/container/.ssh"
+
+SETTINGS_FILE="${CONFIG_DIR}/settings.json"
+USER_DONE_SCRIPT="${SCRIPT_DIR}/on-complete.sh"
+EXAMPLE_DONE_SCRIPT="${SCRIPT_DIR}/on-complete.example.sh"
+
+mkdir -p \
+    "${CONFIG_DIR}" \
+    "${DOWNLOAD_DIR}" \
+    "${INCOMPLETE_DIR}" \
+    "${SCRIPT_DIR}" \
+    "${LOG_DIR}" \
+    "${SSH_DIR}"
+
+export CONFIG_DIR SETTINGS_FILE DOWNLOAD_DIR INCOMPLETE_DIR
+
+# ============================================================
+# TRANSMISSION SETTINGS
+# ============================================================
+
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+settings_file = Path(os.environ["SETTINGS_FILE"])
+settings = {}
+
+if settings_file.exists():
+    try:
+        settings = json.loads(settings_file.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise SystemExit(f"Invalid Transmission settings file: {exc}")
+
+rpc_password = os.environ.get("RPC_PASSWORD", "")
+if not rpc_password:
+    raise SystemExit("RPC_PASSWORD must be set.")
+
+rpc_port = int(os.environ.get("SERVER_PORT", "9091"))
+peer_port = int(os.environ.get("TORRENT_PORT", "51413"))
+
+if not 1 <= rpc_port <= 65535:
+    raise SystemExit("SERVER_PORT must be a valid port.")
+
+if not 1 <= peer_port <= 65535:
+    raise SystemExit("TORRENT_PORT must be a valid port.")
+
+# Migration des anciennes clés snake_case vers kebab-case.
+aliases = {
+    "download_dir": "download-dir",
+    "incomplete_dir": "incomplete-dir",
+    "incomplete_dir_enabled": "incomplete-dir-enabled",
+    "rpc_enabled": "rpc-enabled",
+    "rpc_bind_address": "rpc-bind-address",
+    "rpc_port": "rpc-port",
+    "rpc_authentication_required": "rpc-authentication-required",
+    "rpc_username": "rpc-username",
+    "rpc_password": "rpc-password",
+    "rpc_whitelist_enabled": "rpc-whitelist-enabled",
+    "rpc_host_whitelist_enabled": "rpc-host-whitelist-enabled",
+    "peer_port": "peer-port",
+    "peer_port_random_on_start": "peer-port-random-on-start",
+    "port_forwarding_enabled": "port-forwarding-enabled",
+    "script_torrent_done_enabled": "script-torrent-done-enabled",
+    "script_torrent_done_filename": "script-torrent-done-filename",
+}
+
+for old_key, new_key in aliases.items():
+    if old_key in settings:
+        if new_key not in settings:
+            settings[new_key] = settings[old_key]
+        del settings[old_key]
+
+settings.update({
+    "download-dir": os.environ["DOWNLOAD_DIR"],
+    "incomplete-dir": os.environ["INCOMPLETE_DIR"],
+    "incomplete-dir-enabled": True,
+
+    "rpc-enabled": True,
+    "rpc-bind-address": "0.0.0.0",
+    "rpc-port": rpc_port,
+    "rpc-authentication-required": True,
+    "rpc-username": os.environ.get("RPC_USERNAME", "transmission"),
+    "rpc-password": rpc_password,
+    "rpc-whitelist-enabled": False,
+    "rpc-host-whitelist-enabled": False,
+
+    "peer-port": peer_port,
+    "peer-port-random-on-start": False,
+    "port-forwarding-enabled": False,
+
+    "script-torrent-done-enabled": True,
+    "script-torrent-done-filename": "/usr/local/bin/transmission-torrent-done",
+})
+
+tmp_file = settings_file.with_suffix(".json.tmp")
+tmp_file.write_text(json.dumps(settings, indent=2) + "\n")
+tmp_file.replace(settings_file)
+PY
+
+# ============================================================
+# SCRIPT UTILISATEUR PAR DEFAUT
+# ============================================================
+
+if [ ! -f "${USER_DONE_SCRIPT}" ]; then
+    cat > "${USER_DONE_SCRIPT}" <<'SCRIPT'
+#!/bin/bash
+
+# Script exécuté à chaque fin de téléchargement.
+#
+# Variables Transmission disponibles :
+#   TR_TORRENT_NAME
+#   TR_TORRENT_DIR
+#   TR_TORRENT_HASH
+#   TR_TORRENT_ID
+#   TR_TORRENT_BYTES_DOWNLOADED
+#   TR_TORRENT_LABELS
+#   TR_TIME_LOCALTIME
+
+printf '%s | %s | %s | %s\n' \
+    "${TR_TIME_LOCALTIME:-unknown-time}" \
+    "${TR_TORRENT_NAME:-}" \
+    "${TR_TORRENT_HASH:-}" \
+    "${TR_TORRENT_DIR:-}" \
+    >> /home/container/torrent-completed.log
+SCRIPT
+    chmod 0755 "${USER_DONE_SCRIPT}"
+fi
+
+# ============================================================
+# EXEMPLE DE SCRIPT SFTP / FTP
+# ============================================================
+
+if [ ! -f "${EXAMPLE_DONE_SCRIPT}" ]; then
+    cat > "${EXAMPLE_DONE_SCRIPT}" <<'SCRIPT'
+#!/bin/bash
+set -Eeuo pipefail
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# Protocole : sftp ou ftp
+PROTOCOL="sftp"
+
+REMOTE_HOST="192.168.2.10"
+REMOTE_PORT="22"
+REMOTE_USER="utilisateur"
+REMOTE_PASSWORD="mot_de_passe"
+
+# Répertoire de destination distant
+REMOTE_DIR="/incoming"
+
+# Nombre de transferts simultanés pour les dossiers
+PARALLEL=2
+
+# ============================================================
+# TRAITEMENT
+# ============================================================
+
+log() {
+    printf '%s | %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+}
+
+case "${PROTOCOL}" in
+    sftp)
+        DEFAULT_PORT=22
+        ;;
+    ftp)
+        DEFAULT_PORT=21
+        ;;
+    *)
+        log "ERREUR : protocole inconnu : ${PROTOCOL}"
+        exit 1
+        ;;
+esac
+
+if [ -z "${REMOTE_HOST}" ] || [ -z "${REMOTE_USER}" ] || [ -z "${REMOTE_PASSWORD}" ]; then
+    log "ERREUR : configuration distante incomplète."
+    exit 1
+fi
+
+if ! command -v lftp >/dev/null 2>&1; then
+    log "ERREUR : lftp n'est pas installé."
+    exit 1
+fi
+
+LOCAL_PATH="${TR_TORRENT_DIR:?}/${TR_TORRENT_NAME:?}"
+
+if [ ! -e "${LOCAL_PATH}" ]; then
+    log "ERREUR : fichier ou dossier introuvable : ${LOCAL_PATH}"
+    exit 1
+fi
+
+REMOTE_PORT="${REMOTE_PORT:-${DEFAULT_PORT}}"
+REMOTE_DIR="${REMOTE_DIR%/}"
+
+if [ -d "${LOCAL_PATH}" ]; then
+    REMOTE_TARGET="${REMOTE_DIR}/${TR_TORRENT_NAME}"
+else
+    REMOTE_TARGET="${REMOTE_DIR}"
+fi
+
+# Échappement des valeurs pour les commandes lftp.
+lftp_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//\$/\\\$}"
+    value="${value//\`/\\\`}"
+    printf '"%s"' "${value}"
+}
+
+LFTP_COMMANDS="$(mktemp)"
+chmod 600 "${LFTP_COMMANDS}"
+trap 'rm -f "${LFTP_COMMANDS}"' EXIT
+
+{
+    printf 'set cmd:fail-exit yes\n'
+    printf 'set net:max-retries 2\n'
+    printf 'set net:timeout 30\n'
+    printf 'set sftp:auto-confirm no\n'
+
+    printf 'open -u %s,%s %s\n' \
+        "$(lftp_quote "${REMOTE_USER}")" \
+        "$(lftp_quote "${REMOTE_PASSWORD}")" \
+        "$(lftp_quote "${PROTOCOL}://${REMOTE_HOST}:${REMOTE_PORT}")"
+
+    printf 'mkdir -p %s\n' "$(lftp_quote "${REMOTE_TARGET}")"
+
+    if [ -d "${LOCAL_PATH}" ]; then
+        printf 'mirror --reverse --verbose --continue --parallel=%s %s %s\n' \
+            "${PARALLEL}" \
+            "$(lftp_quote "${LOCAL_PATH}")" \
+            "$(lftp_quote "${REMOTE_TARGET}")"
+    else
+        printf 'put -O %s %s\n' \
+            "$(lftp_quote "${REMOTE_TARGET}")" \
+            "$(lftp_quote "${LOCAL_PATH}")"
+    fi
+
+    printf 'bye\n'
+} > "${LFTP_COMMANDS}"
+
+log "Début de l'upload : ${TR_TORRENT_NAME}"
+log "Destination : ${PROTOCOL}://${REMOTE_HOST}:${REMOTE_PORT}${REMOTE_TARGET}"
+
+lftp -f "${LFTP_COMMANDS}"
+
+log "Upload terminé : ${TR_TORRENT_NAME}"
+SCRIPT
+    chmod 0755 "${EXAMPLE_DONE_SCRIPT}"
+fi
+
+# Permissions des répertoires et fichiers persistants.
+chmod 0700 "${SSH_DIR}"
+chmod 0755 "${SCRIPT_DIR}" "${LOG_DIR}"
+
+# ============================================================
+# DEMARRAGE TRANSMISSION
+# ============================================================
+
+exec transmission-daemon \
+    --foreground \
+    --config-dir "${CONFIG_DIR}" \
+    --log-level=info
+
